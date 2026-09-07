@@ -59,11 +59,33 @@ class EmailMessage(BaseModel):
     bcc: list[EmailAddress] = Field(default_factory=list)
     reply_to: list[EmailAddress] = Field(default_factory=list, alias="replyTo")
     subject: str = Field("(no subject)")
-    body_text: str = Field("", description="Extracted plain text body")
-    body_html: str | None = Field(None, description="HTML body if available")
+    body_text: str = Field("", description="Extracted plain text or markdown body")
+    body_html: str | None = Field(None, description="Raw HTML body if available")
     has_attachments: bool = Field(False, description="Whether the email contains file attachments")
     attachments: list[dict[str, Any]] = Field(
         default_factory=list, description="Attachment metadata"
+    )
+
+
+class EmailThread(BaseModel):
+    """Structured conversation thread containing chronologically ordered messages."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(..., description="Unique JMAP Thread ID")
+    email_ids: list[str] = Field(
+        default_factory=list, alias="emailIds", description="Ordered list of email IDs in thread"
+    )
+    messages: list[EmailMessage] = Field(
+        default_factory=list, description="Chronologically ordered messages"
+    )
+    subject: str = Field("(no subject)", description="Thread subject line")
+    message_count: int = Field(0, description="Total number of messages in thread")
+    senders: list[str] = Field(
+        default_factory=list, description="Unique senders participating in the thread"
+    )
+    has_attachments: bool = Field(
+        False, description="Whether any message in the thread has attachments"
     )
 
 

@@ -2,11 +2,19 @@
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
+import html2text
 import httpx
 
-from agent_jmap_mcp.models import EmailAddress, EmailHeader, EmailMessage, MailboxInfo
+from agent_jmap_mcp.models import (
+    EmailAddress,
+    EmailHeader,
+    EmailMessage,
+    EmailThread,
+    MailboxInfo,
+)
 
 
 def _format_address(addr: Any) -> dict[str, str]:
@@ -50,76 +58,95 @@ class JMAPClient:
         self._api_url: str | None = None
         self._download_url: str | None = None
         self._upload_url: str | None = None
-        self._primary_accounts: dict[str, str] = {}
-        self._session_initialized = False
+
+        # Setup html2text converter
+        self._html_converter = html2text.HTML2Text()
+        self._html_converter.ignore_links = False
+        self._html_converter.ignore_images = False
+        self._html_converter.body_width = 0
 
     @property
     def primary_mail_account_id(self) -> str | None:
         return self.account_id
 
     def _headers(self) -> dict[str, str]:
-        headers = {
+        return {
+            "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        return headers
 
     def discover_session(self) -> dict[str, Any]:
-        """Fetch JMAP session resource (RFC 8620 Section 2)."""
+        """Discover JMAP server session capabilities and URLs (RFC 8620 Section 2)."""
+        logger.debug("Querying JMAP session at: %s", self.session_url)
         with httpx.Client(timeout=self.timeout) as client:
             resp = client.get(self.session_url, headers=self._headers())
-            if resp.status_code == 401:
-                raise PermissionError(
-                    "JMAP Authentication failed: Invalid or expired Bearer token."
-                )
             resp.raise_for_status()
             data = resp.json()
 
         self._api_url = data.get("apiUrl")
         self._download_url = data.get("downloadUrl")
         self._upload_url = data.get("uploadUrl")
-        self._primary_accounts = data.get("primaryAccounts", {})
 
         if not self.account_id:
-            self.account_id = (
-                self._primary_accounts.get(self.CAPABILITY_MAIL)
-                or self._primary_accounts.get(self.CAPABILITY_CORE)
-                or next(iter(data.get("accounts", {}).keys()), None)
+            primary_accounts = data.get("primaryAccounts", {})
+            self.account_id = primary_accounts.get(self.CAPABILITY_MAIL) or primary_accounts.get(
+                self.CAPABILITY_CORE
             )
 
-        if not self.account_id:
-            raise ValueError("No JMAP Mail account ID could be determined from the session.")
+            if not self.account_id and data.get("accounts"):
+                # Fallback to the first account with mail capability
+                for acc_id, acc_data in data["accounts"].items():
+                    caps = acc_data.get("accountCapabilities", {})
+                    if self.CAPABILITY_MAIL in caps:
+                        self.account_id = acc_id
+                        break
 
-        self._session_initialized = True
+        if not self._api_url:
+            raise ValueError("JMAP Session response missing 'apiUrl'.")
+
         return data
 
     def _ensure_session(self) -> None:
-        if not self._session_initialized or not self._api_url:
+        if not self._api_url or not self.account_id:
             self.discover_session()
 
     def request(self, method_calls: list[list[Any]]) -> dict[str, Any]:
-        """Execute a standard JMAP Request containing one or more method calls."""
+        """Execute a standard RFC 8620 JMAP POST request containing batch method calls."""
         self._ensure_session()
-
         payload = {
-            "using": [self.CAPABILITY_CORE, self.CAPABILITY_MAIL, self.CAPABILITY_SUBMISSION],
+            "using": [
+                self.CAPABILITY_CORE,
+                self.CAPABILITY_MAIL,
+                self.CAPABILITY_SUBMISSION,
+            ],
             "methodCalls": method_calls,
         }
 
         with httpx.Client(timeout=self.timeout) as client:
-            resp = client.post(self._api_url, headers=self._headers(), json=payload)
-            if resp.status_code == 401:
-                raise PermissionError("JMAP API Request unauthorized: Invalid token.")
+            resp = client.post(
+                self._api_url,  # type: ignore
+                headers=self._headers(),
+                json=payload,
+            )
             resp.raise_for_status()
             return resp.json()
 
     def get_mailboxes(self) -> list[MailboxInfo]:
-        """Retrieve all available mailboxes and folders."""
+        """Retrieve all accessible mailboxes/folders for the account."""
         self._ensure_session()
-        response = self.request([["Mailbox/get", {"accountId": self.account_id}, "m0"]])
-        method_responses = response.get("methodResponses", [])
+        calls = [
+            [
+                "Mailbox/get",
+                {
+                    "accountId": self.account_id,
+                    "ids": None,
+                },
+                "c0",
+            ]
+        ]
+        resp = self.request(calls)
+        method_responses = resp.get("methodResponses", [])
 
         mailboxes: list[MailboxInfo] = []
         for name, args, _call_id in method_responses:
@@ -130,150 +157,172 @@ class JMAPClient:
                             id=item.get("id"),
                             name=item.get("name"),
                             role=item.get("role"),
-                            totalEmails=item.get("totalEmails", 0),
-                            unreadEmails=item.get("unreadEmails", 0),
+                            total_emails=item.get("totalEmails", 0),
+                            unread_emails=item.get("unreadEmails", 0),
                         )
                     )
         return mailboxes
 
     def resolve_mailbox_id(self, mailbox_name_or_role: str) -> str | None:
-        """Find a mailbox ID by its role or case-insensitive name."""
+        """Resolve a mailbox ID from standard name (e.g. INBOX, Archive) or role (inbox, sent, drafts, etc.)."""
         mailboxes = self.get_mailboxes()
-        target = mailbox_name_or_role.lower().strip()
+        target = mailbox_name_or_role.strip().lower()
 
+        # Check by role first
         for mb in mailboxes:
             if mb.role and mb.role.lower() == target:
                 return mb.id
+
+        # Check by exact/case-insensitive name
         for mb in mailboxes:
             if mb.name.lower() == target:
                 return mb.id
-            if target == "inbox" and (mb.role == "inbox" or mb.name.upper() == "INBOX"):
+
+        # Check by raw ID
+        for mb in mailboxes:
+            if mb.id == mailbox_name_or_role:
                 return mb.id
+
         return None
 
     def list_emails(
         self,
         mailbox_name: str = "INBOX",
-        limit: int = 10,
+        limit: int = 20,
         unread_only: bool = False,
-        query_text: str | None = None,
+        query: str | None = None,
+        from_addr: str | None = None,
+        subject_contains: str | None = None,
     ) -> list[EmailHeader]:
-        """Query and list email headers with preview."""
+        """Query and return email headers matching the given filter criteria."""
         self._ensure_session()
         mailbox_id = self.resolve_mailbox_id(mailbox_name)
 
         filter_conditions: dict[str, Any] = {}
         if mailbox_id:
             filter_conditions["inMailbox"] = mailbox_id
-        if unread_only:
-            filter_conditions["hasKeyword"] = False
-            filter_conditions["keyword"] = "$seen"
-        if query_text:
-            filter_conditions["text"] = query_text
 
-        query_args: dict[str, Any] = {
+        if unread_only:
+            filter_conditions["hasKeyword"] = "$seen"
+            # In JMAP, unread is absence of $seen: we use filter operator if needed or post-filter
+            # Standard RFC 8621 filter: notKeyword: "$seen"
+            filter_conditions.pop("hasKeyword")
+            filter_conditions["notKeyword"] = "$seen"
+
+        if query:
+            filter_conditions["text"] = query
+        if from_addr:
+            filter_conditions["from"] = from_addr
+        if subject_contains:
+            filter_conditions["subject"] = subject_contains
+
+        query_payload: dict[str, Any] = {
             "accountId": self.account_id,
             "filter": filter_conditions if filter_conditions else None,
             "sort": [{"property": "receivedAt", "isAscending": False}],
             "limit": limit,
+            "calculateTotal": True,
         }
-        query_args = {k: v for k, v in query_args.items() if v is not None}
 
-        # Step 1: Query IDs
-        query_resp = self.request([["Email/query", query_args, "q0"]])
-        email_ids = []
-        for name, args, _ in query_resp.get("methodResponses", []):
-            if name == "Email/query":
-                email_ids = args.get("ids", [])
-
-        if not email_ids:
-            return []
-
-        # Step 2: Fetch headers and preview
-        get_args = {
-            "accountId": self.account_id,
-            "ids": email_ids,
-            "properties": [
-                "id",
-                "blobId",
-                "threadId",
-                "mailboxIds",
-                "keywords",
-                "receivedAt",
-                "from",
-                "to",
-                "subject",
-                "preview",
+        # Query + back-reference Email/get in single batch request
+        calls = [
+            ["Email/query", query_payload, "q0"],
+            [
+                "Email/get",
+                {
+                    "accountId": self.account_id,
+                    "#ids": {
+                        "resultOf": "q0",
+                        "name": "Email/query",
+                        "path": "/ids",
+                    },
+                    "properties": [
+                        "id",
+                        "blobId",
+                        "threadId",
+                        "mailboxIds",
+                        "keywords",
+                        "receivedAt",
+                        "from",
+                        "to",
+                        "subject",
+                        "preview",
+                    ],
+                },
+                "g0",
             ],
-        }
+        ]
 
-        get_resp = self.request([["Email/get", get_args, "g0"]])
+        resp = self.request(calls)
         headers: list[EmailHeader] = []
 
-        for name, args, _ in get_resp.get("methodResponses", []):
+        for name, args, _ in resp.get("methodResponses", []):
             if name == "Email/get":
                 for item in args.get("list", []):
-                    keywords = item.get("keywords") or {}
-                    is_unread = "$seen" not in keywords
-
                     from_list = [
-                        EmailAddress(name=addr.get("name"), email=addr.get("email", ""))
-                        for addr in (item.get("from") or [])
+                        EmailAddress(name=a.get("name"), email=a.get("email", ""))
+                        for a in item.get("from", [])
                     ]
                     to_list = [
-                        EmailAddress(name=addr.get("name"), email=addr.get("email", ""))
-                        for addr in (item.get("to") or [])
+                        EmailAddress(name=a.get("name"), email=a.get("email", ""))
+                        for a in item.get("to", [])
                     ]
+                    keywords = item.get("keywords", {})
+                    unread = not keywords.get("$seen", False)
 
                     headers.append(
                         EmailHeader(
                             id=item.get("id"),
-                            blobId=item.get("blobId"),
-                            threadId=item.get("threadId"),
+                            blob_id=item.get("blobId"),
+                            thread_id=item.get("threadId"),
                             subject=item.get("subject") or "(no subject)",
                             from_addr=from_list,
                             to=to_list,
-                            receivedAt=item.get("receivedAt", ""),
+                            received_at=item.get("receivedAt", ""),
                             preview=item.get("preview", ""),
-                            unread=is_unread,
+                            unread=unread,
                             keywords=keywords,
                         )
                     )
+
         return headers
 
     def get_email(self, email_id: str, mark_as_read: bool = False) -> EmailMessage | None:
-        """Retrieve complete email content by ID."""
+        """Fetch the full structured email content by ID."""
         self._ensure_session()
 
-        get_args = {
-            "accountId": self.account_id,
-            "ids": [email_id],
-            "properties": [
-                "id",
-                "blobId",
-                "threadId",
-                "mailboxIds",
-                "keywords",
-                "size",
-                "receivedAt",
-                "from",
-                "to",
-                "cc",
-                "bcc",
-                "replyTo",
-                "subject",
-                "bodyValues",
-                "textBody",
-                "htmlBody",
-                "attachments",
-                "preview",
-            ],
-            "bodyProperties": ["partId", "blobId", "size", "type", "subparts"],
-            "fetchTextBodyValues": True,
-            "fetchHTMLBodyValues": True,
-        }
+        calls = [
+            [
+                "Email/get",
+                {
+                    "accountId": self.account_id,
+                    "ids": [email_id],
+                    "fetchTextBodyValues": True,
+                    "fetchHTMLBodyValues": True,
+                    "properties": [
+                        "id",
+                        "blobId",
+                        "threadId",
+                        "mailboxIds",
+                        "keywords",
+                        "receivedAt",
+                        "from",
+                        "to",
+                        "cc",
+                        "bcc",
+                        "replyTo",
+                        "subject",
+                        "bodyStructure",
+                        "bodyValues",
+                        "textBody",
+                        "htmlBody",
+                        "attachments",
+                    ],
+                },
+                "g0",
+            ]
+        ]
 
-        calls = [["Email/get", get_args, "g0"]]
         if mark_as_read:
             calls.append(
                 [
@@ -282,95 +331,293 @@ class JMAPClient:
                         "accountId": self.account_id,
                         "update": {email_id: {"keywords/$seen": True}},
                     },
-                    "s0",
+                    "u0",
                 ]
             )
 
-        response = self.request(calls)
-        email_data = None
+        resp = self.request(calls)
+        email_item = None
 
-        for name, args, _ in response.get("methodResponses", []):
+        for name, args, _ in resp.get("methodResponses", []):
             if name == "Email/get":
-                item_list = args.get("list", [])
-                if item_list:
-                    email_data = item_list[0]
+                items = args.get("list", [])
+                if items:
+                    email_item = items[0]
 
-        if not email_data:
+        if not email_item:
             return None
 
-        # Resolve plain text body from bodyValues
-        body_values = email_data.get("bodyValues", {})
-        extracted_text = ""
-
-        # 1. Try textBody parts
-        for part in email_data.get("textBody", []):
-            part_id = part.get("partId")
-            if part_id in body_values:
-                extracted_text += body_values[part_id].get("value", "")
-
-        # 2. Fallback to htmlBody parts if plain text is empty
-        extracted_html = ""
-        for part in email_data.get("htmlBody", []):
-            part_id = part.get("partId")
-            if part_id in body_values:
-                extracted_html += body_values[part_id].get("value", "")
-
-        if not extracted_text and extracted_html:
-            # Simple text extraction from HTML
-            clean_text = re.sub(r"<[^>]+>", " ", extracted_html)
-            clean_text = re.sub(r"\s+", " ", clean_text).strip()
-            extracted_text = clean_text
-
+        # Extract addresses
         from_list = [
             EmailAddress(name=a.get("name"), email=a.get("email", ""))
-            for a in (email_data.get("from") or [])
+            for a in email_item.get("from", [])
         ]
         to_list = [
             EmailAddress(name=a.get("name"), email=a.get("email", ""))
-            for a in (email_data.get("to") or [])
+            for a in email_item.get("to", [])
         ]
         cc_list = [
             EmailAddress(name=a.get("name"), email=a.get("email", ""))
-            for a in (email_data.get("cc") or [])
+            for a in email_item.get("cc", [])
         ]
         bcc_list = [
             EmailAddress(name=a.get("name"), email=a.get("email", ""))
-            for a in (email_data.get("bcc") or [])
+            for a in email_item.get("bcc", [])
         ]
         reply_to_list = [
             EmailAddress(name=a.get("name"), email=a.get("email", ""))
-            for a in (email_data.get("replyTo") or [])
+            for a in email_item.get("replyTo", [])
         ]
 
-        attachments = email_data.get("attachments") or []
+        body_text, body_html, attachments = self._extract_body_and_attachments(email_item)
 
         return EmailMessage(
-            id=email_data.get("id"),
-            blobId=email_data.get("blobId"),
-            threadId=email_data.get("threadId"),
-            mailboxIds=email_data.get("mailboxIds", {}),
-            keywords=email_data.get("keywords", {}),
-            receivedAt=email_data.get("receivedAt", ""),
+            id=email_item.get("id"),
+            blob_id=email_item.get("blobId"),
+            thread_id=email_item.get("threadId"),
+            mailbox_ids=email_item.get("mailboxIds", {}),
+            keywords=email_item.get("keywords", {}),
+            received_at=email_item.get("receivedAt", ""),
             from_addr=from_list,
             to=to_list,
             cc=cc_list,
             bcc=bcc_list,
-            replyTo=reply_to_list,
-            subject=email_data.get("subject") or "(no subject)",
-            body_text=extracted_text,
-            body_html=extracted_html if extracted_html else None,
+            reply_to=reply_to_list,
+            subject=email_item.get("subject") or "(no subject)",
+            body_text=body_text,
+            body_html=body_html if body_html else None,
             has_attachments=len(attachments) > 0,
             attachments=attachments,
         )
 
+    def _extract_body_and_attachments(
+        self, item: dict[str, Any]
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        """Extract body text (or markdown converted from HTML) and attachment metadata."""
+        body_values = item.get("bodyValues", {})
+        text_parts = item.get("textBody", [])
+        html_parts = item.get("htmlBody", [])
+
+        extracted_text = ""
+        extracted_html = ""
+
+        # Extract text/plain
+        for part in text_parts:
+            part_id = part.get("partId")
+            if part_id and part_id in body_values:
+                extracted_text += body_values[part_id].get("value", "")
+
+        # Extract text/html
+        for part in html_parts:
+            part_id = part.get("partId")
+            if part_id and part_id in body_values:
+                extracted_html += body_values[part_id].get("value", "")
+
+        # If text/plain was absent or empty, convert HTML to clean markdown for LLM consumption
+        if not extracted_text.strip() and extracted_html.strip():
+            try:
+                extracted_text = self._html_converter.handle(extracted_html).strip()
+            except Exception:
+                extracted_text = re.sub(r"<[^>]+>", " ", extracted_html)
+                extracted_text = re.sub(r"\s+", " ", extracted_text).strip()
+
+        # Attachments metadata
+        attachments: list[dict[str, Any]] = []
+        for att in item.get("attachments", []):
+            attachments.append(
+                {
+                    "blobId": att.get("blobId"),
+                    "name": att.get("name", "unnamed_attachment"),
+                    "type": att.get("type", "application/octet-stream"),
+                    "size": att.get("size", 0),
+                    "cid": att.get("cid"),
+                }
+            )
+
+        return extracted_text.strip(), extracted_html.strip(), attachments
+
+    def download_attachment(
+        self,
+        blob_id: str,
+        filename: str | None = None,
+        account_id: str | None = None,
+        output_path: str | None = None,
+    ) -> bytes:
+        """Download binary attachment data via RFC 8620 downloadUrl template."""
+        self._ensure_session()
+        target_account_id = account_id or self.account_id
+
+        if not self._download_url:
+            raise RuntimeError("JMAP downloadUrl was not provided by server session.")
+
+        name_part = filename or "attachment"
+        url = (
+            self._download_url.replace("{accountId}", target_account_id or "")
+            .replace("{blobId}", blob_id)
+            .replace("{name}", name_part)
+        )
+
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.get(url, headers={"Authorization": f"Bearer {self.token}"})
+            resp.raise_for_status()
+            content = resp.content
+
+        if output_path:
+            out_file = Path(output_path)
+            if out_file.is_dir():
+                out_file = out_file / name_part
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_bytes(content)
+            logger.info("Saved attachment (%d bytes) to %s", len(content), out_file)
+
+        return content
+
+    def get_thread(self, thread_id: str) -> EmailThread | None:
+        """Fetch and aggregate an entire conversation thread chronologically (RFC 8621 Thread/get)."""
+        self._ensure_session()
+
+        calls = [
+            [
+                "Thread/get",
+                {
+                    "accountId": self.account_id,
+                    "ids": [thread_id],
+                },
+                "t0",
+            ],
+            [
+                "Email/get",
+                {
+                    "accountId": self.account_id,
+                    "#ids": {
+                        "resultOf": "t0",
+                        "name": "Thread/get",
+                        "path": "/list/0/emailIds",
+                    },
+                    "fetchTextBodyValues": True,
+                    "fetchHTMLBodyValues": True,
+                    "properties": [
+                        "id",
+                        "blobId",
+                        "threadId",
+                        "mailboxIds",
+                        "keywords",
+                        "receivedAt",
+                        "from",
+                        "to",
+                        "cc",
+                        "bcc",
+                        "replyTo",
+                        "subject",
+                        "bodyStructure",
+                        "bodyValues",
+                        "textBody",
+                        "htmlBody",
+                        "attachments",
+                    ],
+                },
+                "e0",
+            ],
+        ]
+
+        resp = self.request(calls)
+        email_ids: list[str] = []
+        raw_emails: list[dict[str, Any]] = []
+
+        for name, args, _ in resp.get("methodResponses", []):
+            if name == "Thread/get":
+                thread_list = args.get("list", [])
+                if thread_list:
+                    email_ids = thread_list[0].get("emailIds", [])
+            elif name == "Email/get":
+                raw_emails = args.get("list", [])
+
+        if not email_ids and not raw_emails:
+            return None
+
+        # Map raw emails by ID
+        email_map = {item.get("id"): item for item in raw_emails if item.get("id")}
+        ordered_messages: list[EmailMessage] = []
+        unique_senders: set[str] = set()
+        has_attachments = False
+        subject = "(no subject)"
+
+        for eid in email_ids:
+            if eid in email_map:
+                item = email_map[eid]
+                from_list = [
+                    EmailAddress(name=a.get("name"), email=a.get("email", ""))
+                    for a in item.get("from", [])
+                ]
+                to_list = [
+                    EmailAddress(name=a.get("name"), email=a.get("email", ""))
+                    for a in item.get("to", [])
+                ]
+                cc_list = [
+                    EmailAddress(name=a.get("name"), email=a.get("email", ""))
+                    for a in item.get("cc", [])
+                ]
+                bcc_list = [
+                    EmailAddress(name=a.get("name"), email=a.get("email", ""))
+                    for a in item.get("bcc", [])
+                ]
+                reply_to_list = [
+                    EmailAddress(name=a.get("name"), email=a.get("email", ""))
+                    for a in item.get("replyTo", [])
+                ]
+
+                for fa in from_list:
+                    unique_senders.add(fa.format_string())
+
+                body_text, body_html, attachments = self._extract_body_and_attachments(item)
+                if attachments:
+                    has_attachments = True
+
+                if not subject or subject == "(no subject)":
+                    subject = item.get("subject") or subject
+
+                ordered_messages.append(
+                    EmailMessage(
+                        id=item.get("id"),
+                        blob_id=item.get("blobId"),
+                        thread_id=item.get("threadId") or thread_id,
+                        mailbox_ids=item.get("mailboxIds", {}),
+                        keywords=item.get("keywords", {}),
+                        received_at=item.get("receivedAt", ""),
+                        from_addr=from_list,
+                        to=to_list,
+                        cc=cc_list,
+                        bcc=bcc_list,
+                        reply_to=reply_to_list,
+                        subject=item.get("subject") or "(no subject)",
+                        body_text=body_text,
+                        body_html=body_html if body_html else None,
+                        has_attachments=len(attachments) > 0,
+                        attachments=attachments,
+                    )
+                )
+
+        # Sort messages chronologically by receivedAt
+        ordered_messages.sort(key=lambda m: m.received_at)
+
+        return EmailThread(
+            id=thread_id,
+            email_ids=email_ids,
+            messages=ordered_messages,
+            subject=subject,
+            message_count=len(ordered_messages),
+            senders=sorted(list(unique_senders)),
+            has_attachments=has_attachments,
+        )
+
     def send_email(
         self,
-        to: list[str],
+        to: list[str | EmailAddress],
         subject: str,
         body: str,
         from_addr: str | None = None,
-        cc: list[str] | None = None,
-        bcc: list[str] | None = None,
+        cc: list[str | EmailAddress] | None = None,
+        bcc: list[str | EmailAddress] | None = None,
         draft_only: bool = False,
     ) -> dict[str, Any]:
         """Create and submit an email atomically via JMAP Email/set and EmailSubmission/set."""
@@ -500,8 +747,6 @@ class JMAPClient:
             "status": "draft_created" if draft_only else "sent",
             "emailId": created_email_id,
             "submissionId": submission_id,
-            "to": to,
-            "subject": subject,
         }
 
 

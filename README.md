@@ -8,7 +8,7 @@
 
 A stateless, production-grade JSON Meta Application Protocol (JMAP) client and Model Context Protocol (MCP) server for AI agents, automation pipelines, and developer workflows.
 
-Compliant with [RFC 8620](https://datatracker.ietf.org/doc/html/rfc8620) (JMAP Core) and [RFC 8621](https://datatracker.ietf.org/doc/html/rfc8621) (JMAP Mail), `agent-jmap-mcp` allows language models (e.g. Claude, Hermes Agent, GPT-4, Cursor) to inspect mailboxes, search and retrieve messages, perform automated inbox triage, and compose/send emails atomically over pure HTTP.
+Compliant with [RFC 8620](https://datatracker.ietf.org/doc/html/rfc8620) (JMAP Core) and [RFC 8621](https://datatracker.ietf.org/doc/html/rfc8621) (JMAP Mail), `agent-jmap-mcp` allows language models (e.g. Claude, Hermes Agent, GPT-4, Cursor) to inspect mailboxes, search and retrieve messages, navigate conversation threads, download attachments, perform automated inbox triage, and compose/send emails atomically over pure HTTP.
 
 ---
 
@@ -22,8 +22,9 @@ flowchart TD
 
     subgraph MCP["agent-jmap-mcp Server"]
         Server["FastMCP stdio Engine"]
-        Tools["Tools Interface<br/>(list, search, get, send, triage)"]
+        Tools["Tools Interface<br/>(list, search, get, thread, download, send, triage)"]
         TriageEng["Rule-Based Triage Engine"]
+        Converter["HTML-to-Markdown Engine"]
         Client["RFC 8620/8621 JMAP Client"]
     end
 
@@ -34,8 +35,9 @@ flowchart TD
     Agent <-->|"JSON-RPC / stdio"| Server
     Server --> Tools
     Tools --> TriageEng
+    Tools --> Converter
     Tools --> Client
-    Client <-->|"Stateless HTTPS (JSON Batches)"| JMAPEndpoint
+    Client <-->|"Stateless HTTPS (JSON Batches / Binary Streams)"| JMAPEndpoint
 ```
 
 ---
@@ -44,6 +46,9 @@ flowchart TD
 
 - **Stateless HTTP Architecture**: Operates over standard HTTPS with bearer token authentication. Avoids persistent IMAP socket overhead and connection timeout state.
 - **Atomic Operations**: Executes message creation and dispatch in a single atomic transaction combining `Email/set` and `EmailSubmission/set`.
+- **Conversation Threading (`Thread/get`)**: Full RFC 8621 conversation thread retrieval aggregating multi-turn email dialogues chronologically.
+- **Binary Attachment Downloads**: High-speed streaming downloads for PDF, image, and data attachments via session `downloadUrl`.
+- **Rich HTML-to-Markdown Extraction**: Automated markdown conversion for HTML-only newsletters and styled emails.
 - **Session Auto-Discovery**: Automatically queries `/.well-known/jmap` to discover API endpoints, upload/download URLs, and primary account IDs.
 - **Zero-Footprint Model Context**: Optimized JSON payloads structured specifically for minimal LLM context window consumption.
 - **Automated Inbox Triage**: Built-in heuristic classification for inbox sorting (Urgent, Action Required, Personal, Notifications, Newsletters).
@@ -165,10 +170,12 @@ Add to `settings.json`:
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
 | `jmap_list_mailboxes` | None | Returns metadata for all mailboxes (IDs, names, roles, unread/total counts). |
-| `jmap_list_emails` | `mailbox` (str), `unread_only` (bool), `limit` (int), `query` (str), `from_addr` (str), `subject_contains` (str) | Queries email headers with filtering, search conditions, and sorting. |
-| `jmap_get_email` | `email_id` (str), `mark_as_read` (bool) | Fetches full email body text, HTML, sender/recipient lists, and attachment metadata. |
-| `jmap_send_email` | `to` (list), `subject` (str), `body` (str), `from_addr` (str), `cc` (list), `bcc` (list), `draft_only` (bool) | Atomically creates and submits an outgoing message (or saves to drafts). |
-| `jmap_triage_inbox` | `mailbox` (str), `limit` (int) | Analyzes recent unread messages and returns categorization, priorities, and action items. |
+| `jmap_list_emails` | `mailbox`, `limit`, `unread_only`, `query`, `from_address`, `subject_contains` | Queries email headers with filtering, search conditions, and sorting. |
+| `jmap_get_email` | `email_id` (str), `mark_as_read` (bool) | Fetches full email body (converted to markdown if HTML), headers, and attachments. |
+| `jmap_get_thread` | `thread_id` (str) | Fetches full multi-message conversation thread chronologically. |
+| `jmap_download_attachment` | `blob_id` (str), `filename` (str), `save_directory` (str) | Downloads binary attachment from JMAP server and saves to disk. |
+| `jmap_send_email` | `to` (list), `subject` (str), `body` (str), `from_address` (str), `cc` (list), `bcc` (list), `draft_only` (bool) | Atomically creates and submits an outgoing message (or saves to drafts). |
+| `jmap_triage_inbox` | `mailbox` (str), `limit` (int), `unread_only` (bool) | Analyzes recent messages and returns categorization, priorities, and action items. |
 
 ---
 
@@ -189,6 +196,12 @@ agent-jmap list --unread --query "invoice"
 
 # View specific email
 agent-jmap get <email-id>
+
+# View entire conversation thread
+agent-jmap thread <thread-id>
+
+# Download binary attachment
+agent-jmap download <blob-id> --name report.pdf --output ./downloads
 
 # Run inbox triage
 agent-jmap triage --limit 20
@@ -220,6 +233,12 @@ uv run pytest -v
 ```bash
 uv run ruff check .
 uv run ruff format .
+```
+
+### Building Distribution Packages
+
+```bash
+uv build
 ```
 
 ---

@@ -103,6 +103,154 @@ def test_list_mailboxes(monkeypatch):
     assert mailboxes[0].unread_emails == 3
 
 
+def test_html_to_markdown_body_extraction(monkeypatch):
+    client = JMAPClient(
+        session_url="https://jmap.example.com/.well-known/jmap",
+        api_token="test-token-123",
+    )
+
+    def mock_get(self, url, **kwargs):
+        return httpx.Response(200, json=MOCK_SESSION, request=httpx.Request("GET", url))
+
+    def mock_post(self, url, **kwargs):
+        data = {
+            "methodResponses": [
+                [
+                    "Email/get",
+                    {
+                        "accountId": "acc-123",
+                        "list": [
+                            {
+                                "id": "msg-html-only",
+                                "blobId": "b1",
+                                "threadId": "t1",
+                                "receivedAt": "2026-09-06T12:00:00Z",
+                                "subject": "HTML Newsletter",
+                                "htmlBody": [{"partId": "h1"}],
+                                "bodyValues": {
+                                    "h1": {
+                                        "value": "<h1>Welcome</h1><p>Check out our <strong>new features</strong>!</p>"
+                                    }
+                                },
+                                "attachments": [],
+                            }
+                        ],
+                    },
+                    "0",
+                ]
+            ]
+        }
+        return httpx.Response(200, json=data, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    email = client.get_email("msg-html-only")
+    assert email is not None
+    assert "# Welcome" in email.body_text
+    assert "**new features**" in email.body_text
+
+
+def test_download_attachment(monkeypatch, tmp_path):
+    client = JMAPClient(
+        session_url="https://jmap.example.com/.well-known/jmap",
+        api_token="test-token-123",
+    )
+
+    def mock_get(self, url, **kwargs):
+        if ".well-known/jmap" in str(url):
+            return httpx.Response(200, json=MOCK_SESSION, request=httpx.Request("GET", url))
+        if "download" in str(url):
+            return httpx.Response(
+                200, content=b"%PDF-1.4 mock binary data", request=httpx.Request("GET", url)
+            )
+        return httpx.Response(404, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+
+    out_file = tmp_path / "sample.pdf"
+    content = client.download_attachment(
+        blob_id="blob-999", filename="sample.pdf", output_path=str(out_file)
+    )
+
+    assert content == b"%PDF-1.4 mock binary data"
+    assert out_file.exists()
+    assert out_file.read_bytes() == b"%PDF-1.4 mock binary data"
+
+
+def test_get_thread(monkeypatch):
+    client = JMAPClient(
+        session_url="https://jmap.example.com/.well-known/jmap",
+        api_token="test-token-123",
+    )
+
+    def mock_get(self, url, **kwargs):
+        return httpx.Response(200, json=MOCK_SESSION, request=httpx.Request("GET", url))
+
+    def mock_post(self, url, **kwargs):
+        data = {
+            "methodResponses": [
+                [
+                    "Thread/get",
+                    {
+                        "accountId": "acc-123",
+                        "list": [
+                            {
+                                "id": "thread-abc",
+                                "emailIds": ["m1", "m2"],
+                            }
+                        ],
+                    },
+                    "t0",
+                ],
+                [
+                    "Email/get",
+                    {
+                        "accountId": "acc-123",
+                        "list": [
+                            {
+                                "id": "m1",
+                                "threadId": "thread-abc",
+                                "subject": "Project Proposal",
+                                "from": [{"name": "Alice", "email": "alice@example.com"}],
+                                "to": [{"name": "Bob", "email": "bob@example.com"}],
+                                "receivedAt": "2026-09-06T10:00:00Z",
+                                "textBody": [{"partId": "p1"}],
+                                "bodyValues": {"p1": {"value": "Initial proposal notes."}},
+                            },
+                            {
+                                "id": "m2",
+                                "threadId": "thread-abc",
+                                "subject": "Re: Project Proposal",
+                                "from": [{"name": "Bob", "email": "bob@example.com"}],
+                                "to": [{"name": "Alice", "email": "alice@example.com"}],
+                                "receivedAt": "2026-09-06T10:30:00Z",
+                                "textBody": [{"partId": "p2"}],
+                                "bodyValues": {"p2": {"value": "Looks great, approved!"}},
+                            },
+                        ],
+                    },
+                    "e0",
+                ],
+            ]
+        }
+        return httpx.Response(200, json=data, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.Client, "get", mock_get)
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    thread = client.get_thread("thread-abc")
+    assert thread is not None
+    assert thread.id == "thread-abc"
+    assert thread.message_count == 2
+    assert thread.email_ids == ["m1", "m2"]
+    assert len(thread.messages) == 2
+    assert thread.messages[0].id == "m1"
+    assert thread.messages[1].id == "m2"
+    assert "Initial proposal notes." in thread.messages[0].body_text
+    assert "Looks great, approved!" in thread.messages[1].body_text
+
+
 def test_atomic_send_email(monkeypatch):
     client = JMAPClient(
         session_url="https://jmap.example.com/.well-known/jmap",
