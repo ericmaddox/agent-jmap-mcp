@@ -1,5 +1,6 @@
 # agent-jmap-mcp
 
+[![PyPI Version](https://img.shields.io/pypi/v/agent-jmap-mcp.svg)](https://pypi.org/project/agent-jmap-mcp/)
 [![CI](https://github.com/ericmaddox/agent-jmap-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ericmaddox/agent-jmap-mcp/actions/workflows/ci.yml)
 [![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
