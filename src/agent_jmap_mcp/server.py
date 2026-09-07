@@ -3,8 +3,6 @@
 import json
 import logging
 import os
-import sys
-from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -12,7 +10,9 @@ from agent_jmap_mcp.client import JMAPClient
 from agent_jmap_mcp.triage import triage_mailbox
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger("agent-jmap-mcp")
 
 # Initialize FastMCP Server
@@ -47,7 +47,7 @@ def jmap_list_emails(
     mailbox: str = "INBOX",
     limit: int = 10,
     unread_only: bool = False,
-    query: Optional[str] = None,
+    query: str | None = None,
 ) -> str:
     """List emails from a specified mailbox with subject, sender, date, unread flag, and preview snippet.
 
@@ -84,12 +84,12 @@ def jmap_get_email(email_id: str, mark_as_read: bool = False) -> str:
 
 @mcp.tool()
 def jmap_send_email(
-    to: List[str],
+    to: list[str],
     subject: str,
     body: str,
-    from_address: Optional[str] = None,
-    cc: Optional[List[str]] = None,
-    bcc: Optional[List[str]] = None,
+    from_address: str | None = None,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
     draft_only: bool = False,
 ) -> str:
     """Send an email or create an email draft atomically using JMAP Email/set and EmailSubmission/set.

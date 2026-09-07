@@ -5,10 +5,10 @@ from agent_jmap_mcp.models import EmailAddress, EmailHeader, EmailMessage, Mailb
 
 __version__ = "0.1.0"
 __all__ = [
-    "JMAPClient",
-    "EmailMessage",
-    "EmailHeader",
     "EmailAddress",
+    "EmailHeader",
+    "EmailMessage",
+    "JMAPClient",
     "MailboxInfo",
     "TriageResult",
     "__version__",

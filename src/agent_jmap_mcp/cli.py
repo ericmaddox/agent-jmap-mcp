@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Any, List
+from typing import Any
 
 from rich.console import Console
 from rich.table import Table
@@ -88,12 +88,16 @@ def main() -> int:
         parser.print_help()
         return 1
 
-    session_url = args.session_url or os.environ.get("JMAP_SESSION_URL") or os.environ.get("JMAP_URL")
+    session_url = (
+        args.session_url or os.environ.get("JMAP_SESSION_URL") or os.environ.get("JMAP_URL")
+    )
     token = args.token or os.environ.get("JMAP_API_TOKEN") or os.environ.get("JMAP_TOKEN") or ""
     account_id = args.account_id or os.environ.get("JMAP_ACCOUNT_ID")
 
     if not session_url:
-        console.print("[bold red]Error:[/bold red] JMAP Session URL is required. Set JMAP_SESSION_URL or use --session-url.")
+        console.print(
+            "[bold red]Error:[/bold red] JMAP Session URL is required. Set JMAP_SESSION_URL or use --session-url."
+        )
         return 1
 
     client = JMAPClient(session_url=session_url, token=token, account_id=account_id)
@@ -111,11 +115,18 @@ def main() -> int:
                 table.add_column("Total", justify="right")
                 table.add_column("Unread", justify="right", style="magenta")
                 for mb in mbs:
-                    table.add_row(mb.id, mb.name, mb.role or "-", str(mb.totalEmails), str(mb.unreadEmails))
+                    table.add_row(
+                        mb.id, mb.name, mb.role or "-", str(mb.totalEmails), str(mb.unreadEmails)
+                    )
                 console.print(table)
 
         elif args.command == "list":
-            emails = client.list_emails(mailbox_name=args.mailbox, limit=args.limit, unread_only=args.unread, query_text=args.query)
+            emails = client.list_emails(
+                mailbox_name=args.mailbox,
+                limit=args.limit,
+                unread_only=args.unread,
+                query_text=args.query,
+            )
             if args.json:
                 print(json.dumps([e.model_dump(by_alias=True) for e in emails], indent=2))
             else:
@@ -127,7 +138,13 @@ def main() -> int:
                 table.add_column("Unread", justify="center")
                 for e in emails:
                     unread_marker = "[bold red]●[/bold red]" if e.unread else "[dim]○[/dim]"
-                    table.add_row(e.id, e.receivedAt[:16].replace("T", " "), format_addresses(e.from_addr), e.subject, unread_marker)
+                    table.add_row(
+                        e.id,
+                        e.receivedAt[:16].replace("T", " "),
+                        format_addresses(e.from_addr),
+                        e.subject,
+                        unread_marker,
+                    )
                 console.print(table)
 
         elif args.command == "get":
@@ -140,7 +157,9 @@ def main() -> int:
             else:
                 console.print(f"[bold cyan]ID:[/bold cyan] {email_msg.id}")
                 console.print(f"[bold cyan]Subject:[/bold cyan] [bold]{email_msg.subject}[/bold]")
-                console.print(f"[bold cyan]From:[/bold cyan] {format_addresses(email_msg.from_addr)}")
+                console.print(
+                    f"[bold cyan]From:[/bold cyan] {format_addresses(email_msg.from_addr)}"
+                )
                 console.print(f"[bold cyan]To:[/bold cyan] {format_addresses(email_msg.to)}")
                 if email_msg.cc:
                     console.print(f"[bold cyan]CC:[/bold cyan] {format_addresses(email_msg.cc)}")
@@ -162,10 +181,14 @@ def main() -> int:
                 print(json.dumps(res, indent=2))
             else:
                 action = "Draft created" if args.draft else "Email sent successfully"
-                console.print(f"[bold green]✓ {action}![/bold green] Email ID: [cyan]{res.get('emailId')}[/cyan]")
+                console.print(
+                    f"[bold green]✓ {action}![/bold green] Email ID: [cyan]{res.get('emailId')}[/cyan]"
+                )
 
         elif args.command == "triage":
-            res = triage_mailbox(client=client, mailbox_name=args.mailbox, limit=args.limit, unread_only=not args.all)
+            res = triage_mailbox(
+                client=client, mailbox_name=args.mailbox, limit=args.limit, unread_only=not args.all
+            )
             if args.json:
                 print(json.dumps(res.model_dump(), indent=2))
             else:
@@ -176,16 +199,21 @@ def main() -> int:
                 table.add_column("Subject", style="bold")
                 table.add_column("Action Summary", style="yellow")
                 for cat in res.categories:
-                    table.add_row(str(cat.priority), cat.category.upper(), cat.from_address[:25], cat.subject[:30], cat.summary)
+                    table.add_row(
+                        str(cat.priority),
+                        cat.category.upper(),
+                        cat.from_address[:25],
+                        cat.subject[:30],
+                        cat.summary,
+                    )
                 console.print(table)
                 if res.recommended_actions:
-                    console.print("
-[bold yellow]Recommended Action Items:[/bold yellow]")
+                    console.print("\n[bold yellow]Recommended Action Items:[/bold yellow]")
                     for act in res.recommended_actions:
                         console.print(f" • {act}")
 
         return 0
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         console.print(f"[bold red]Execution Error:[/bold red] {e}")
         return 1
 

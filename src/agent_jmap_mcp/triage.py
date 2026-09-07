@@ -1,6 +1,5 @@
 """Automated email triage, categorization, and digest generation for AI agents."""
 
-from typing import List, Optional
 from agent_jmap_mcp.client import JMAPClient
 from agent_jmap_mcp.models import TriageCategory, TriageResult
 
@@ -13,20 +12,46 @@ def classify_email(subject: str, sender: str, preview: str) -> tuple[str, int, s
     text = f"{s_lower} {snd_lower} {p_lower}"
 
     # Priority 1: Security, OTPs, urgent flags
-    if any(k in text for k in ["security alert", "password reset", "urgent", "action required", "verify your account", "2fa", "verification code"]):
+    if any(
+        k in text
+        for k in [
+            "security alert",
+            "password reset",
+            "urgent",
+            "action required",
+            "verify your account",
+            "2fa",
+            "verification code",
+        ]
+    ):
         return "urgent", 1, "Immediate user attention or security verification required."
 
     # Priority 2: Invoices, Billing, Direct Requests
-    if any(k in text for k in ["invoice", "receipt", "payment", "billing", "due date", "scheduled meeting", "calendar invite"]):
+    if any(
+        k in text
+        for k in [
+            "invoice",
+            "receipt",
+            "payment",
+            "billing",
+            "due date",
+            "scheduled meeting",
+            "calendar invite",
+        ]
+    ):
         return "action_needed", 2, "Financial transaction or scheduled commitment."
 
     # Priority 3: Personal or Direct Conversations
-    if not any(k in snd_lower for k in ["no-reply", "noreply", "newsletter", "marketing", "updates"]):
-        if any(k in text for k in ["hey", "hi", "thanks", "meeting", "project", "review"]):
-            return "personal", 3, "Direct correspondence from contact."
+    if not any(
+        k in snd_lower for k in ["no-reply", "noreply", "newsletter", "marketing", "updates"]
+    ) and any(k in text for k in ["hey", "hi", "thanks", "meeting", "project", "review"]):
+        return "personal", 3, "Direct correspondence from contact."
 
     # Priority 4: Notifications & Automated System Updates
-    if any(k in text for k in ["build", "github", "jira", "deploy", "alert", "monitoring", "notification"]):
+    if any(
+        k in text
+        for k in ["build", "github", "jira", "deploy", "alert", "monitoring", "notification"]
+    ):
         return "notification", 4, "Automated CI/CD or platform notification."
 
     # Priority 5: Newsletters & Marketing
@@ -45,8 +70,8 @@ def triage_mailbox(
     """Analyze and summarize a mailbox with structured action categories."""
     emails = client.list_emails(mailbox_name=mailbox_name, limit=limit, unread_only=unread_only)
 
-    categories: List[TriageCategory] = []
-    actions: List[str] = []
+    categories: list[TriageCategory] = []
+    actions: list[str] = []
 
     for item in emails:
         sender_str = ", ".join([a.format_string() for a in item.from_addr])

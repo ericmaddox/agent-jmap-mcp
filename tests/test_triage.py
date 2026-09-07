@@ -4,7 +4,7 @@ from agent_jmap_mcp.triage import classify_email
 
 
 def test_classify_urgent():
-    cat, prio, summary = classify_email(
+    cat, prio, _ = classify_email(
         subject="Urgent: Security Alert - 2FA code",
         sender="security@auth.com",
         preview="Your single use verification code is 123456.",
@@ -14,7 +14,7 @@ def test_classify_urgent():
 
 
 def test_classify_action_needed():
-    cat, prio, summary = classify_email(
+    cat, prio, _ = classify_email(
         subject="Invoice #4928 Due for Payment",
         sender="billing@saas.com",
         preview="Please review the attached invoice due on Friday.",
@@ -24,7 +24,7 @@ def test_classify_action_needed():
 
 
 def test_classify_newsletter():
-    cat, prio, summary = classify_email(
+    cat, prio, _ = classify_email(
         subject="Weekly AI Digest Issue #42",
         sender="newsletter@weeklydigest.com",
         preview="Click here to unsubscribe if you no longer wish to receive this.",

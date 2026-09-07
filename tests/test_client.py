@@ -1,7 +1,7 @@
 """Unit tests for JMAPClient."""
 
 import httpx
-import pytest
+
 from agent_jmap_mcp.client import JMAPClient
 from agent_jmap_mcp.models import EmailAddress
 
