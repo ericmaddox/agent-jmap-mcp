@@ -1,216 +1,237 @@
 # agent-jmap-mcp
 
-<div align="center">
+[![CI](https://github.com/ericmaddox/agent-jmap-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ericmaddox/agent-jmap-mcp/actions/workflows/ci.yml)
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![MCP Protocol](https://img.shields.io/badge/MCP-1.3.0%2B-purple.svg)](https://modelcontextprotocol.io)
+[![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-[![CI](https://github.com/ericmaddox/agent-jmap-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ericmaddox/agent-jmap-mcp/actions)
-[![PyPI version](https://img.shields.io/pypi/v/agent-jmap-mcp.svg?color=blue)](https://pypi.org/project/agent-jmap-mcp/)
-[![Python versions](https://img.shields.io/pypi/pyversions/agent-jmap-mcp.svg)](https://pypi.org/project/agent-jmap-mcp/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![MCP Protocol](https://img.shields.io/badge/Protocol-Model%20Context%20Protocol%20(MCP)-orange)](https://modelcontextprotocol.io)
+A stateless, production-grade JSON Meta Application Protocol (JMAP) client and Model Context Protocol (MCP) server for AI agents, automation pipelines, and developer workflows.
 
-**Modern, stateless JMAP email client and Model Context Protocol (MCP) server for AI agents, Claude, Cursor, and Hermes.**
-
-[Features](#-key-features) • [Architecture](#-architecture) • [Quickstart](#-quickstart) • [MCP Configuration](#-mcp-configuration) • [CLI Usage](#-cli-usage) • [RFC Compliance](#-rfc-standards-compliance)
-
-</div>
+Compliant with [RFC 8620](https://datatracker.ietf.org/doc/html/rfc8620) (JMAP Core) and [RFC 8621](https://datatracker.ietf.org/doc/html/rfc8621) (JMAP Mail), `agent-jmap-mcp` allows language models (e.g. Claude, Hermes Agent, GPT-4, Cursor) to inspect mailboxes, search and retrieve messages, perform automated inbox triage, and compose/send emails atomically over pure HTTP.
 
 ---
 
-## 📌 Overview
-
-**`agent-jmap-mcp`** is a high-performance, vendor-neutral email tool built natively on **JMAP (JSON Meta Application Protocol — RFC 8620 & RFC 8621)** and the **Model Context Protocol (MCP)**.
-
-Unlike legacy IMAP/SMTP tools that suffer from socket lockups, stateful connection drops, and noisy parsing, `agent-jmap-mcp` operates over clean, stateless JSON/HTTP with **atomic email creation and submission in a single round-trip**.
-
-Works natively with **Fastmail**, **Stalwart Mail Server**, **Apache James**, and Cyrus IMAP across any AI agent harness.
-
----
-
-## 🚀 Key Features
-
-- **⚡ Atomic Message Creation & Submission**: Executes `Email/set` and `EmailSubmission/set` in a single transactional JMAP request.
-- **🔍 Fast Search & Structured Extraction**: Multi-criteria search (`hasKeyword`, `inMailbox`, `text`, `receivedAt`) with automatic HTML-to-text fallback and snippet previews.
-- **🤖 Automated Inbox Triage**: Built-in intelligent classifier that parses subjects, headers, and previews to categorize emails (`urgent`, `action_needed`, `personal`, `notification`, `newsletter`) with priority ratings (1–5) and action item summaries.
-- **🛡️ Fail-Closed Security**: Zero credential leakage, Bearer token isolation, and full environment variable gating.
-- **🔌 Universal MCP Compatibility**: Instant integration with **Claude Desktop**, **Cursor IDE**, **Hermes Agent**, **Zed Editor**, and **OpenAI Assistants**.
-- **💻 Rich CLI Included**: Full standalone CLI tool (`agent-jmap`) with formatted tables and JSON output modes.
-
----
-
-## 🏛 Architecture
+## Architecture
 
 ```mermaid
 flowchart TD
-    subgraph AI Harnesses
-        Claude["Claude Desktop / Code"]
-        Cursor["Cursor IDE"]
-        Hermes["Hermes Agent"]
-        Zed["Zed Editor"]
+    subgraph Host["AI Agent / Host Application"]
+        Agent["AI Agent / LLM Client"]
     end
 
-    subgraph agent-jmap-mcp ["agent-jmap-mcp (MCP & CLI Layer)"]
-        Server["MCP Server (FastMCP / stdio)"]
-        CLI["CLI Tool (agent-jmap)"]
-        TriageEngine["Triage & Classification Engine"]
-        Client["JMAPClient (RFC 8620 / 8621)"]
+    subgraph MCP["agent-jmap-mcp Server"]
+        Server["FastMCP stdio Engine"]
+        Tools["Tools Interface<br/>(list, search, get, send, triage)"]
+        TriageEng["Rule-Based Triage Engine"]
+        Client["RFC 8620/8621 JMAP Client"]
     end
 
-    subgraph JMAP Mail Providers
-        Fastmail["Fastmail API"]
-        Stalwart["Stalwart Mail Server"]
-        James["Apache James / Cyrus"]
+    subgraph Upstream["JMAP Email Server"]
+        JMAPEndpoint["JMAP API Endpoint<br/>(Fastmail / Stalwart / Cyrus)"]
     end
 
-    Claude -->|MCP Protocol / JSON-RPC| Server
-    Cursor -->|MCP Protocol / JSON-RPC| Server
-    Hermes -->|MCP Client or CLI| Server
-    Zed -->|MCP Protocol / JSON-RPC| Server
-
-    CLI --> Client
-    Server --> Client
-    Server --> TriageEngine
-    TriageEngine --> Client
-
-    Client -->|HTTPS / JSON Request| Fastmail
-    Client -->|HTTPS / JSON Request| Stalwart
-    Client -->|HTTPS / JSON Request| James
+    Agent <-->|"JSON-RPC / stdio"| Server
+    Server --> Tools
+    Tools --> TriageEng
+    Tools --> Client
+    Client <-->|"Stateless HTTPS (JSON Batches)"| JMAPEndpoint
 ```
 
 ---
 
-## 📦 Quickstart
+## Key Capabilities
 
-### 1. Run without installation via `uvx`
+- **Stateless HTTP Architecture**: Operates over standard HTTPS with bearer token authentication. Avoids persistent IMAP socket overhead and connection timeout state.
+- **Atomic Operations**: Executes message creation and dispatch in a single atomic transaction combining `Email/set` and `EmailSubmission/set`.
+- **Session Auto-Discovery**: Automatically queries `/.well-known/jmap` to discover API endpoints, upload/download URLs, and primary account IDs.
+- **Zero-Footprint Model Context**: Optimized JSON payloads structured specifically for minimal LLM context window consumption.
+- **Automated Inbox Triage**: Built-in heuristic classification for inbox sorting (Urgent, Action Required, Personal, Notifications, Newsletters).
+- **Universal MCP Compatibility**: Plugs directly into Claude Desktop, Hermes Agent, Cursor, Zed, and any MCP-compliant environment.
+
+---
+
+## Installation
+
+### Using uv (Recommended)
+
 ```bash
-# Run the MCP Server
-uvx agent-jmap-mcp
-
-# Or use the CLI
-uvx --from agent-jmap-mcp agent-jmap --help
+uv tool install agent-jmap-mcp
 ```
 
-### 2. Install via `pip`
+### Using pipx or pip
+
 ```bash
+pipx install agent-jmap-mcp
+# or
 pip install agent-jmap-mcp
 ```
 
 ---
 
-## ⚙️ MCP Configuration
+## Configuration
 
-Add `agent-jmap-mcp` to your client configuration:
+Set the required environment variables:
 
-### 🟣 Claude Desktop
-Add to `claude_desktop_config.json`:
+| Variable | Description | Example / Default |
+| :--- | :--- | :--- |
+| `JMAP_SESSION_URL` | JMAP Session discovery URL | `https://api.fastmail.com/.well-known/jmap` |
+| `JMAP_API_TOKEN` | Bearer API token | `fmu1-...` |
+| `JMAP_ACCOUNT_ID` | Optional target account ID | Auto-discovered from session if omitted |
+
+A `.env.example` template is provided in the repository.
+
+---
+
+## MCP Server Integration
+
+### Claude Desktop
+
+Add to your `claude_desktop_config.json`:
+
 ```json
 {
   "mcpServers": {
-    "jmap-email": {
+    "jmap": {
       "command": "uvx",
       "args": ["agent-jmap-mcp"],
       "env": {
-        "JMAP_SESSION_URL": "https://api.fastmail.com/jmap/session",
-        "JMAP_API_TOKEN": "fmu1-your-fastmail-api-token"
+        "JMAP_SESSION_URL": "https://api.fastmail.com/.well-known/jmap",
+        "JMAP_API_TOKEN": "YOUR_JMAP_API_TOKEN"
       }
     }
   }
 }
 ```
 
-### 🤖 Hermes Agent
+### Hermes Agent
+
 Add to `~/.hermes/config.yaml`:
+
 ```yaml
 mcp_servers:
-  jmap-email:
+  jmap:
     command: "uvx"
     args: ["agent-jmap-mcp"]
     env:
-      JMAP_SESSION_URL: "https://api.fastmail.com/jmap/session"
-      JMAP_API_TOKEN: "fmu1-your-fastmail-api-token"
+      JMAP_SESSION_URL: "https://api.fastmail.com/.well-known/jmap"
+      JMAP_API_TOKEN: "${JMAP_API_TOKEN}"
 ```
 
-### 🟦 Cursor IDE
-In **Cursor Settings > Features > MCP Servers > Add New MCP Server**:
-- **Name**: `jmap-email`
-- **Type**: `command`
-- **Command**: `uvx agent-jmap-mcp`
-- **Environment Variables**:
-  - `JMAP_SESSION_URL=https://api.fastmail.com/jmap/session`
-  - `JMAP_API_TOKEN=fmu1-your-fastmail-api-token`
+### Cursor
+
+Add to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "jmap": {
+      "command": "uvx",
+      "args": ["agent-jmap-mcp"],
+      "env": {
+        "JMAP_SESSION_URL": "https://api.fastmail.com/.well-known/jmap",
+        "JMAP_API_TOKEN": "YOUR_JMAP_API_TOKEN"
+      }
+    }
+  }
+}
+```
+
+### Zed Editor
+
+Add to `settings.json`:
+
+```json
+{
+  "context_servers": {
+    "jmap": {
+      "command": {
+        "path": "uvx",
+        "args": ["agent-jmap-mcp"],
+        "env": {
+          "JMAP_SESSION_URL": "https://api.fastmail.com/.well-known/jmap",
+          "JMAP_API_TOKEN": "YOUR_JMAP_API_TOKEN"
+        }
+      }
+    }
+  }
+}
+```
 
 ---
 
-## 🛠 MCP Tools Exposed
+## Available MCP Tools
 
-The server provides 5 high-level tools designed for autonomous agents:
-
-| Tool | Parameters | Description |
+| Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
-| **`jmap_list_mailboxes`** | *None* | Discovers all folders/mailboxes (`INBOX`, `Sent`, `Drafts`, `Trash`, `Archive`). |
-| **`jmap_list_emails`** | `mailbox`, `limit`, `unread_only`, `query` | Queries email headers with sender, date, preview snippet, and unread flags. |
-| **`jmap_get_email`** | `email_id`, `mark_as_read` | Retrieves the full structured message body (plain text & HTML), headers, and attachments. |
-| **`jmap_send_email`** | `to`, `subject`, `body`, `from_address`, `cc`, `bcc`, `draft_only` | Atomically creates and submits an email or saves to Drafts in a single request. |
-| **`jmap_triage_inbox`** | `mailbox`, `limit`, `unread_only` | Parses, categorizes (`urgent`, `action_needed`, `personal`, etc.), and extracts actionable next steps. |
+| `jmap_list_mailboxes` | None | Returns metadata for all mailboxes (IDs, names, roles, unread/total counts). |
+| `jmap_list_emails` | `mailbox` (str), `unread_only` (bool), `limit` (int), `query` (str), `from_addr` (str), `subject_contains` (str) | Queries email headers with filtering, search conditions, and sorting. |
+| `jmap_get_email` | `email_id` (str), `mark_as_read` (bool) | Fetches full email body text, HTML, sender/recipient lists, and attachment metadata. |
+| `jmap_send_email` | `to` (list), `subject` (str), `body` (str), `from_addr` (str), `cc` (list), `bcc` (list), `draft_only` (bool) | Atomically creates and submits an outgoing message (or saves to drafts). |
+| `jmap_triage_inbox` | `mailbox` (str), `limit` (int) | Analyzes recent unread messages and returns categorization, priorities, and action items. |
 
 ---
 
-## 💻 CLI Usage
+## Command Line Interface (CLI)
 
-The package includes the `agent-jmap` terminal utility:
+The package includes a standalone CLI tool `agent-jmap`:
 
 ```bash
-# Set your environment variables
-export JMAP_SESSION_URL="https://api.fastmail.com/jmap/session"
-export JMAP_API_TOKEN="fmu1-your-api-token"
+# Start MCP server over stdio
+agent-jmap serve
 
-# List all folders
+# List available mailboxes
 agent-jmap mailboxes
 
-# View unread emails in INBOX
-agent-jmap list --unread --limit 5
+# List recent emails
+agent-jmap list --limit 10
+agent-jmap list --unread --query "invoice"
 
-# Read full content of an email
-agent-jmap get <email_id> --read
+# View specific email
+agent-jmap get <email-id>
 
-# Run automated triage summary
-agent-jmap triage --limit 10
+# Run inbox triage
+agent-jmap triage --limit 20
 
-# Send an email
-agent-jmap send --to "team@example.com" --subject "Status Update" --body "Deployment complete."
-
-# Save a draft
-agent-jmap send --to "client@example.com" --subject "Proposal" --body "Draft notes..." --draft
+# Send email from command line
+agent-jmap send --to user@example.com --subject "Status Update" --body "Processing completed."
 ```
 
 ---
 
-## 📜 RFC Standards Compliance
+## Development and Testing
 
-- **[RFC 8620](https://datatracker.ietf.org/doc/html/rfc8620)**: The JSON Meta Application Protocol (JMAP Core Architecture).
-- **[RFC 8621](https://datatracker.ietf.org/doc/html/rfc8621)**: The JSON Meta Application Protocol (JMAP Mail specification).
-- **[Model Context Protocol](https://modelcontextprotocol.io)**: Anthropic MCP stdio specifications.
-
----
-
-## 🧪 Development & Testing
+### Setup Environment
 
 ```bash
-# Clone the repository
 git clone https://github.com/ericmaddox/agent-jmap-mcp.git
 cd agent-jmap-mcp
+uv sync --extra dev
+```
 
-# Install in editable mode with test dependencies
-pip install -e ".[dev]"
+### Running Test Suite
 
-# Run tests with coverage
-pytest -v --cov=agent_jmap_mcp
+```bash
+uv run pytest -v
+```
 
-# Lint codebase
-ruff check src tests
+### Code Formatting and Linting
+
+```bash
+uv run ruff check .
+uv run ruff format .
 ```
 
 ---
 
-## 📄 License
+## RFC Compliance
 
-This project is licensed under the [MIT License](LICENSE).
+- [RFC 8620: The JSON Meta Application Protocol (JMAP)](https://datatracker.ietf.org/doc/html/rfc8620)
+- [RFC 8621: The JSON Meta Application Protocol (JMAP) for Mail](https://datatracker.ietf.org/doc/html/rfc8621)
+- [RFC 5322: Internet Message Format](https://datatracker.ietf.org/doc/html/rfc5322)
+
+---
+
+## License
+
+MIT License. Copyright (c) 2026 Eric Maddox. See [LICENSE](LICENSE) for details.
